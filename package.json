@@ -4,6 +4,10 @@
   "description": "Live, named handles on the pieces of a codebase, for agents",
   "type": "module",
   "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "module": "src/index.ts",
   "bin": {
     "myc": "src/cli.ts"
   },
