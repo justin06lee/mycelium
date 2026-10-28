@@ -1,11 +1,14 @@
 import { Language, Parser } from "web-tree-sitter";
 import goWasm from "tree-sitter-go/tree-sitter-go.wasm" with { type: "file" };
 import core from "web-tree-sitter/web-tree-sitter.wasm" with { type: "file" };
+// tree-sitter-swift publishes no wasm; this one is built from its 0.7.1 release, patched, by `make grammars`.
+import swiftWasm from "../../grammars/tree-sitter-swift.wasm" with { type: "file" };
 
 // Loaded once, up front, so adapters can stay synchronous. The wasm files are embedded in the compiled binary.
 await Parser.init({ locateFile: () => core });
 const LANGUAGES = {
   go: await Language.load(await Bun.file(goWasm).bytes()),
+  swift: await Language.load(await Bun.file(swiftWasm).bytes()),
 };
 
 export type Lang = keyof typeof LANGUAGES;

@@ -135,7 +135,7 @@ myc play
 { "render": { "wrapper": "src/Providers.tsx#Providers", "css": ["src/app/globals.css"], "setup": [".mycelium/setup.ts"] } }
 ```
 
-React and the rest come from the project's own `node_modules` (a Wails app's `frontend/node_modules`), so install its dependencies first. Go terminal views don't render here: a browser can't run them.
+React and the rest come from the project's own `node_modules` (a Wails app's `frontend/node_modules`), so install its dependencies first. Go terminal views and SwiftUI views don't render here: a browser can't run them. SwiftUI's live render is Xcode's canvas, and a view's `#Preview` blocks come with it in `myc show`.
 
 ## How it works
 
@@ -154,6 +154,8 @@ Splitting a component into new files needs no relinking: the new files are trace
 
 **Go.** A Go package shares one scope across its files, so the Go adapter slices by declaration instead of by file. It parses with tree-sitter (embedded in the binary, no Go toolchain needed). In a package that imports Bubble Tea, Lip Gloss or Bubbles, a component is a type with a `View` method (a model with `Init` and `Update` too is a screen), or a function or method returning `string` that draws: its name ends in `view`, or it calls `Render`, `View`, `JoinVertical`/`JoinHorizontal` or `Place`. A type comes with all its methods. From there the slice follows package-level names, other local packages' names, and method calls whose receiver type it can follow through receivers, parameters, struct fields, `range` and `:=`. The same ownership rule applies per declaration: one belongs to the component only if everything that refers to it is inside, and the rest are listed as `shared` by `file#name`. A method's receiver isn't a reference, so `Model.chatView` doesn't drag in the whole model.
 
+**Swift.** A Swift module's files share one scope too, so SwiftUI is sliced the same way, by declaration, with tree-sitter. A module is a target: `Sources/<Target>/` in a package, the folder beside the `.xcodeproj` in an app; test targets are skipped. A component is a top-level type conforming to `View` or `ViewModifier`. A type comes with its extensions, and with the `#Preview` blocks that show it, which serve as its examples (previews don't count as users of a view, the way tests don't). Names resolve file-private first, then module-wide, then through imported local modules; a member added to SwiftUI's own types, like `extension View { func freshness() }`, is found by its name where it's called. Views an `App`'s scene shows are screens, and `private`/`fileprivate` views are internal.
+
 ## Frameworks
 
 One TypeScript adapter covers the React stacks: Next.js (app and pages routers, `@/` aliases), Electron (the renderer is where the JSX is, and electron-vite's split tsconfigs are followed) and Tauri (a Vite frontend, with the Rust side skipped). Plain Vite or CRA React projects work the same way.
@@ -169,7 +171,18 @@ internal/ui/model.go#Model          screen              → ui-model
 
 A Wails app (a `wails.json` root) is both at once: its `frontend/` goes through the TypeScript adapter, and the Go methods a component calls through the generated `wailsjs/go/<package>/<Struct>` bindings join that component's slice, with the Go helpers only they use. Editing `Greet` in `app.go` shows up as a change to the frontend component that calls it. A repo with both a `go.mod` and a `package.json` gets both adapters side by side.
 
-Swift/SwiftUI is planned as a second adapter behind the same `Workspace` interface. Swift has no imports between files in a module, so it will resolve names module-wide, and `#Preview` blocks will serve as each view's example.
+SwiftUI is covered in Swift packages (`Package.swift`) and Xcode apps (an `.xcodeproj` within two levels of the root), including an iOS app living inside a TypeScript repo: both adapters run side by side.
+
+```console
+$ myc show home-view --no-code
+root     ios/Ruri/Views/HomeView.swift#HomeView:6
+files    ios/Ruri/Views/HomeView.swift
+         ios/Ruri/Views/Previews.swift:2,85-88
+         ios/Ruri/Views/Rows.swift:1,19-147
+         …
+shared   ios/Ruri/Model/Status.swift#StatusProject
+         ios/Ruri/RuriModel.swift#RuriModel
+```
 
 ## Storage
 
@@ -193,7 +206,7 @@ for (const chunk of dialog?.slice?.chunks ?? []) console.log(chunk.file, chunk.r
 
 ## Limits
 
-- TypeScript/JavaScript React and Go (Bubble Tea, Wails) so far.
+- TypeScript/JavaScript React, Go (Bubble Tea, Wails) and SwiftUI so far. Nested Swift types aren't components of their own; register the outer one.
 - Go is read without a type checker. A method call on a value whose type it can't follow is linked to the one local type with that method name, if there's only one; calls through interfaces aren't followed.
 - Roots that aren't components (a hook, a helper) can be registered and shown, but they don't relink after a rename.
 - Global CSS selectors and anything wired up at runtime (dynamic imports by string, DI containers) aren't traced. Pin those files.
@@ -207,4 +220,7 @@ bun install
 bun test
 bun run typecheck
 bun run build    # bin/myc
+make grammars    # rebuild grammars/tree-sitter-swift.wasm (needs the tree-sitter CLI)
 ```
+
+The Swift grammar is committed prebuilt because its npm package ships no wasm; `make grammars` rebuilds it from tree-sitter-swift 0.7.1 with a one-line fix to its scanner, whose zero-byte state allocation leaks between parses in wasm.

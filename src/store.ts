@@ -7,7 +7,7 @@ const MARKERS = [".mycelium", ".git", "package.json", "go.mod", "go.work", "wail
 /** The nearest directory at or above `from` that looks like a project root. */
 export function findRoot(from: string): string {
   for (let dir = from; ; dir = dirname(dir)) {
-    if (MARKERS.some((m) => existsSync(join(dir, m)))) {
+    if (MARKERS.some((m) => existsSync(join(dir, m))) || readdirSync(dir).some((n) => n.endsWith(".xcodeproj"))) {
       // A Wails frontend has its own package.json, but the project is the app around it.
       return existsSync(join(dirname(dir), "wails.json")) ? dirname(dir) : dir;
     }

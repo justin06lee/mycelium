@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, extname, join, relative, resolve, sep } from "node:path";
-import { hash, normalizeStyle } from "../../fingerprint.ts";
-import type { Candidate, Chunk, RootRef, Slice, SliceOptions, Workspace } from "../../types.ts";
-import { child, parse, type Syntax, tokens } from "../grammars.ts";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import type { Candidate, RootRef } from "../../types.ts";
+import { child, parse, type Syntax } from "../grammars.ts";
+import { docStart, findDeep, type Unit as BaseUnit, type UnitFile, UnitWorkspace } from "../units.ts";
 
 /** Directories the go tool itself ignores, plus vendored and installed code. */
 const SKIP_DIRS = new Set(["vendor", "testdata", "node_modules"]);
@@ -15,41 +15,18 @@ const NOT_VIEWS = new Set(["String", "GoString", "Error", "View", "view"]);
 
 type UnitKind = "type" | "func" | "method" | "var" | "const";
 
-/** One top-level declaration: the unit Go code is sliced in, since a package shares one scope across its files. */
-interface Unit {
+/** A top-level declaration: Go is sliced in these, since a package shares one scope across its files. Methods are Type.method. */
+interface Unit extends BaseUnit {
   file: GoFile;
   kind: UnitKind;
-  /** The declared name; a method is Type.method. */
-  name: string;
-  /** Every name a var or const spec declares. */
-  names: string[];
   recv?: string;
-  node: Syntax;
-  /** 1-based lines, doc comment included. */
-  from: number;
-  to: number;
-  /** Where the declaration itself starts. */
-  line: number;
 }
 
-/** What a file is made of, in order: the package clause, imports and units, so kept ones can be cut into ranges. */
-interface Item {
-  from: number;
-  to: number;
-  unit?: Unit;
-  import?: boolean;
-}
-
-interface GoFile {
-  abs: string;
-  rel: string;
-  text: string;
-  tree: Syntax;
+interface GoFile extends UnitFile {
   pkg: Pkg;
   /** Local name → import path. */
   imports: Map<string, string>;
   rawImports: { name?: string; path: string }[];
-  items: Item[];
   units: Unit[];
 }
 
@@ -81,15 +58,14 @@ export function isGoWorkspace(root: string): boolean {
   return existsSync(join(root, "go.mod")) || existsSync(join(root, "go.work"));
 }
 
-export class GoWorkspace implements Workspace {
-  private files = new Map<string, GoFile>();
+export class GoWorkspace extends UnitWorkspace<Unit, GoFile> {
   private pkgs = new Map<string, Pkg>();
   private modules: { dir: string; path: string }[] = [];
   private refCache = new Map<Unit, Set<Unit>>();
   private importUse = new Map<Unit, boolean>();
-  private reverse?: Map<Unit, Set<Unit>>;
 
-  constructor(readonly root: string) {
+  constructor(root: string) {
+    super(root);
     const sources: string[] = [];
     const walk = (dir: string) => {
       for (const d of readdirSync(dir, { withFileTypes: true })) {
@@ -115,10 +91,6 @@ export class GoWorkspace implements Workspace {
   }
 
   // ── loading ──────────────────────────────────────────────────────────
-
-  private rel(abs: string): string {
-    return relative(this.root, abs).split(sep).join("/");
-  }
 
   private load(abs: string): void {
     const text = readFileSync(abs, "utf8");
@@ -313,7 +285,7 @@ export class GoWorkspace implements Workspace {
   // ── references ───────────────────────────────────────────────────────
 
   /** The units a unit refers to: package-level names, other packages' names, and methods it calls. */
-  private refsOf(u: Unit): Set<Unit> {
+  protected refsOf(u: Unit): Set<Unit> {
     const cached = this.refCache.get(u);
     if (cached) return cached;
     const out = new Set<Unit>();
@@ -470,25 +442,6 @@ export class GoWorkspace implements Workspace {
     return out;
   }
 
-  private allUnits(): Unit[] {
-    return [...this.files.values()].flatMap((f) => f.units);
-  }
-
-  /** Who refers to each unit. */
-  private referrers(): Map<Unit, Set<Unit>> {
-    if (this.reverse) return this.reverse;
-    const rev = new Map<Unit, Set<Unit>>();
-    for (const u of this.allUnits()) {
-      for (const r of this.refsOf(u)) {
-        const set = rev.get(r) ?? new Set();
-        set.add(u);
-        rev.set(r, set);
-      }
-    }
-    this.reverse = rev;
-    return rev;
-  }
-
   // ── discovery ────────────────────────────────────────────────────────
 
   /** Does the body build a view: style or lay out text, or render a sub-model? */
@@ -532,12 +485,18 @@ export class GoWorkspace implements Workspace {
 
   // ── lookups ──────────────────────────────────────────────────────────
 
-  private unitAt(root: RootRef): Unit | undefined {
-    return this.files.get(root.file)?.units.find((u) => u.name === root.symbol || (u.kind !== "method" && u.names.includes(root.symbol)));
+  protected ownerOf(u: Unit): string | undefined {
+    const type = u.kind === "type" ? u.name : u.recv;
+    return type && `${u.file.pkg.dir}:${type}`;
+  }
+
+  protected usesImports(u: Unit): boolean {
+    this.refsOf(u);
+    return this.importUse.get(u) ?? false;
   }
 
   /** A type comes with its methods, wherever in the package they're declared. */
-  private members(u: Unit): Unit[] {
+  protected members(u: Unit): Unit[] {
     if (u.kind !== "type") return [u];
     const methods = [...(u.file.pkg.methods.get(u.name)?.values() ?? [])].flat();
     return [u, ...methods];
@@ -553,170 +512,9 @@ export class GoWorkspace implements Workspace {
     return undefined;
   }
 
-  usedBy(root: RootRef): string[] {
-    const u = this.unitAt(root);
-    if (!u) return [];
-    const members = new Set(this.members(u));
-    const rev = this.referrers();
-    const files = new Set<string>();
-    for (const m of members) for (const r of rev.get(m) ?? []) if (!members.has(r)) files.add(r.file.rel);
-    return [...files].sort();
-  }
-
-  rootShape(root: RootRef): { shape: string; rootText: string } | undefined {
-    const u = this.unitAt(root);
-    return u && this.shapeOf(u);
-  }
-
-  private shapeOf(u: Unit): { shape: string; rootText: string } {
-    const toks = tokens(u.node, u.file.text);
-    const own = u.names[0]!;
-    return { shape: hash(toks.map((t) => (t === own ? "$" : t)).join(" ")), rootText: toks.join(" ") };
-  }
-
-  // ── slicing ──────────────────────────────────────────────────────────
-
-  slice(root: RootRef, opts: SliceOptions): Slice | undefined {
-    const u = this.unitAt(root);
-    if (!u) return undefined;
-    const traced = this.trace([u], opts);
-    return {
-      root: { file: u.file.rel, symbol: u.name, line: u.line, default: false },
-      ...traced,
-      ...this.shapeOf(u),
-    };
-  }
-
-  /**
-   * The code a set of roots is made of: the roots (a type with its methods), plus every declaration they reach
-   * that nothing else refers to. Declarations other code also uses are linked as shared, and registered
-   * components are linked as uses.
-   */
-  trace(roots: (Unit | RootRef)[], opts: SliceOptions): Pick<Slice, "chunks" | "uses" | "shared"> {
-    const units = roots.map((r) => ("node" in r ? r : this.unitAt(r))).filter((x): x is Unit => !!x);
-    const rootTypes = new Set(units.map((u) => (u.kind === "type" ? u.name : u.recv)).filter(Boolean).map((t) => `${units[0]!.file.pkg.dir}:${t}`));
-
-    // Other registered components. A registered type owns its methods, unless the root is one of them.
-    const boundary = new Map<Unit, RootRef>();
-    const bounds = opts.boundaries.map((b) => ({ b, u: this.unitAt(b) })).filter((x): x is { b: RootRef; u: Unit } => !!x.u && !units.includes(x.u));
-    for (const { b, u } of bounds) boundary.set(u, b);
-    for (const { b, u } of bounds) {
-      if (u.kind !== "type" || rootTypes.has(`${u.file.pkg.dir}:${u.name}`)) continue;
-      for (const m of this.members(u)) if (!boundary.has(m) && !units.includes(m)) boundary.set(m, b);
-    }
-    const uses: RootRef[] = [];
-    const addUse = (b: RootRef) => {
-      if (!uses.some((x) => x.file === b.file && x.symbol === b.symbol)) uses.push({ file: b.file, symbol: b.symbol });
-    };
-
-    const included = new Set<Unit>();
-    for (const u of units) {
-      for (const m of this.members(u)) {
-        const b = m === u ? undefined : boundary.get(m);
-        if (b) addUse(b);
-        else included.add(m);
-      }
-    }
-
-    const reached = new Set<Unit>();
-    const stack = [...included];
-    while (stack.length) {
-      for (const r of this.refsOf(stack.pop()!)) {
-        if (included.has(r) || reached.has(r)) continue;
-        const b = boundary.get(r);
-        if (b) addUse(b);
-        else {
-          reached.add(r);
-          stack.push(r);
-        }
-      }
-    }
-
-    // Keep only what nothing else refers to: the largest set whose referrers are all inside.
-    const owned = new Set(reached);
-    const rev = this.referrers();
-    for (let changed = true; changed; ) {
-      changed = false;
-      for (const u of owned) {
-        if ([...(rev.get(u) ?? [])].some((r) => !owned.has(r) && !included.has(r))) {
-          owned.delete(u);
-          changed = true;
-        }
-      }
-    }
-    const all = new Set([...included, ...owned]);
-    const shared = new Set<string>();
-    for (const u of all) for (const r of this.refsOf(u)) if (!all.has(r) && !boundary.has(r)) shared.add(`${r.file.rel}#${r.name}`);
-
-    const byFile = new Map<GoFile, Set<Unit>>();
-    for (const u of all) byFile.set(u.file, (byFile.get(u.file) ?? new Set()).add(u));
-    const first = units[0]?.file;
-    const files = [...byFile.keys()].sort((a, b) => (a === first ? -1 : b === first ? 1 : a.rel.localeCompare(b.rel)));
-    const chunks = files.map((f) => this.chunk(f, byFile.get(f)!));
-    const taken = new Set(chunks.map((c) => c.file));
-    for (const pin of opts.pins) {
-      if (taken.has(pin)) continue;
-      const c = this.fileChunk(pin);
-      if (c) chunks.push(c);
-    }
-    return { chunks, uses, shared: [...shared].sort() };
-  }
-
-  private chunk(file: GoFile, units: Set<Unit>): Chunk {
-    if (units.size === file.units.length) {
-      return { file: file.rel, kind: "code", text: file.text, hash: hash(tokens(file.tree, file.text).join(" ")) };
-    }
-    const needsImports = [...units].some((u) => (this.refsOf(u), this.importUse.get(u)));
-    const kept = file.items.filter((i) => (i.unit ? units.has(i.unit) : !i.import || needsImports));
-    const ranges: [number, number][] = [];
-    let open = false;
-    for (const item of file.items) {
-      if (!kept.includes(item)) {
-        open = false;
-        continue;
-      }
-      const last = ranges[ranges.length - 1];
-      if (open && last) last[1] = Math.max(last[1], item.to);
-      else ranges.push([item.from, item.to]);
-      open = true;
-    }
-    const lines = file.text.split("\n");
-    const text = ranges.map(([a, b]) => lines.slice(a - 1, b).join("\n")).join("\n// …\n");
-    const toks = [...units].sort((a, b) => a.from - b.from).flatMap((u) => tokens(u.node, file.text));
-    return { file: file.rel, kind: "code", ranges, text, hash: hash(toks.join(" ")) };
-  }
-
-  private fileChunk(rel: string): Chunk | undefined {
-    const go = this.files.get(rel);
-    if (go) return { file: rel, kind: "code", text: go.text, hash: hash(tokens(go.tree, go.text).join(" ")) };
-    const abs = resolve(this.root, rel);
-    if (!existsSync(abs) || !statSync(abs).isFile()) return undefined;
-    const text = readFileSync(abs, "utf8");
-    return { file: rel, kind: extname(abs) === ".css" ? "style" : "asset", text, hash: hash(normalizeStyle(text)) };
-  }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────
-
-/** The row a declaration's doc comment starts on: the comments directly above it, with no blank line between. */
-function docStart(siblings: Syntax[], at: number): number {
-  let row = siblings[at]?.row ?? 0;
-  for (let i = at - 1; i >= 0; i--) {
-    const c = siblings[i]!;
-    if (c.type !== "comment" || c.endRow < row - 1) break;
-    row = c.row;
-  }
-  return at < 0 ? 0 : row;
-}
-
-function findDeep(n: Syntax, test: (n: Syntax) => boolean): Syntax | undefined {
-  for (const c of n.children) {
-    if (test(c)) return c;
-    const hit = findDeep(c, test);
-    if (hit) return hit;
-  }
-  return undefined;
-}
 
 function firstValue(spec: Syntax): Syntax | undefined {
   return child(spec, "value")?.children.find((c) => c.named);
