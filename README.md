@@ -91,13 +91,31 @@ ok        toggle-switch
 | `myc show <slug>... [--no-code]` | A component's code from every file it spans, root first, plus what it uses and what uses it. |
 | `myc scan [--all]` | Components in the code that aren't registered yet, with suggested slugs. `--all` includes unexported ones. |
 | `myc add [<slug>] <file[#Symbol]>` | Register a component by its root declaration. With no `#Symbol`, the file's only (or default) component is used. Takes `--name`, `--note`, `--tags a,b`, `--alias <name>`, `--pin <file>` and `--example '<name>={json props}'` (repeat `--alias`, `--pin` and `--example` for more than one). |
+| `myc add --all [--tags a,b]` | Register everything `scan` lists, under its suggested slugs: a whole project's library in one call. Notes can be added later with `edit`. |
 | `myc edit <slug>` | Change an entry: `--name --note --tags --alias --unalias --root --pin --unpin --example --unexample`. |
 | `myc check [--update]` | Re-find every component after edits. `--update` records the new state. Exits 1 if any component is orphaned. |
 | `myc remove <slug>` | Unregister a component. The code is untouched. |
 | `myc play [--port 4777]` | Serve every component rendered live from the code, with its examples. See [Live rendering](#live-rendering). |
 | `myc mcp` | Serve the commands above as MCP tools over stdio. |
 
-Every command takes `--json` for machine-readable output and `-C <dir>` to run against another directory.
+Every command takes `--json` for machine-readable output and `-C <dir>` to run against another directory. `myc --version` prints the version.
+
+## Using it from a harness
+
+mycelium is the backend for a component library; whatever shows or uses that library is up to the harness. There are three ways in, all the same commands underneath:
+
+- **MCP:** `myc mcp`. The server tells the model how to use the tools, and keeps each project's analysis loaded between calls, dropping it the moment a file changes. The first call on a large project takes a second or several; the ones after it take milliseconds.
+- **CLI:** `myc <command> --json`. Results are JSON on stdout. Errors are `{"error": "…"}`, with exit code 2 for bad arguments and 1 for failures; `show` and `check` also exit 1 when a component is orphaned. Each call reads the project afresh.
+- **Library:** import from `src/index.ts` (Bun). Keep a `Workspaces` for a long-running process, as the MCP server does.
+
+A typical loop for a harness:
+
+1. On opening a project: `add --all` the first time (or `scan`, and let an agent register the ones worth naming), then `list` into the agent's context. It's about 15 tokens per component.
+2. When the agent needs one: `search` by the user's words, then `show` to get its code from every file it spans, with line ranges.
+3. After the agent edits code: `check` says which components changed, moved or are gone; `check --update` records the new state.
+4. To show components to a person: `play`, then embed `<url>c/<slug>?example=<name>` in an iframe. The page posts `{ myc: { slug, height } }` to its parent so the frame can fit its content.
+
+The registry is plain files in `.mycelium/components/`, one JSON file per component, so a harness can also read it directly or commit it with the project.
 
 ## MCP server
 
@@ -200,7 +218,7 @@ const dialog = lib.resolve("settings-dialog");
 for (const chunk of dialog?.slice?.chunks ?? []) console.log(chunk.file, chunk.ranges ?? "whole file");
 ```
 
-`Library` exposes `resolve`, `resolveAll`, `register`, `record` and `unregistered`, which the CLI is built on.
+`Library` exposes `resolve`, `resolveAll`, `register`, `record` and `unregistered`, which the CLI is built on. A long-running process should open workspaces through `new Workspaces().get(root)` instead of `openWorkspace(root)`: it keeps each project's analysis and drops it when a file changes. `run(argv, { out, err, workspace: (root) => workspaces.get(root) })` runs any CLI command in-process that way.
 
 `play(root, { port })` starts the playground in-process and returns `{ url, stop }`. A component's live render is at `${url}c/<slug>`.
 

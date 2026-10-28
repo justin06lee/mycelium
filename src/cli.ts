@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
 import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import pkg from "../package.json" with { type: "json" };
 import { Library, type Resolved } from "./engine.ts";
-import { openWorkspace } from "./index.ts";
+import { openWorkspace } from "./open.ts";
 import { search, words } from "./search.ts";
 import { findRoot, Store } from "./store.ts";
-import type { Candidate, Chunk, Entry, Example, RootRef } from "./types.ts";
+import type { Candidate, Chunk, Entry, Example, RootRef, Workspace } from "./types.ts";
 
 const HELP = `myc: live, named handles on the components of a codebase
 
@@ -18,6 +19,7 @@ usage: myc [-C <dir>] <command> [options] [--json]
   add [<slug>] <file[#Symbol]>  register a component by its root declaration
       [--name <text>] [--note <text>] [--tags a,b] [--alias <name>] [--pin <file>]
       [--example '<name>={"prop":1}']
+  add --all [--tags a,b]        register everything scan lists, with its suggested slugs
   edit <slug>                   change an entry: --name --note --tags --alias --unalias
                                 --root <file[#Symbol]> --pin <file> --unpin <file>
                                 --example '<name>={json props}' --unexample <name>
@@ -28,12 +30,13 @@ usage: myc [-C <dir>] <command> [options] [--json]
 
   -C <dir>   run as if started in <dir>
   --json     machine-readable output
+  --version  print the version
 
 Only the root is stored. The files a component owns, the ones it shares and the
 components it renders are traced from the code on every lookup.`;
 
-const BOOLEAN = new Set(["json", "all", "update", "no-code", "help"]);
-const GLOBAL = ["json", "C", "help"];
+const BOOLEAN = new Set(["json", "all", "update", "no-code", "help", "version"]);
+const GLOBAL = ["json", "C", "help", "version"];
 const SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
 class Fail extends Error {
@@ -97,6 +100,8 @@ export interface Io {
   err: (text: string) => void;
   /** Takes a command's result in both forms instead of out, for callers that pick one later (the MCP server). */
   result?: (data: unknown, text: string) => void;
+  /** The code analysis of a project, for a long-running caller that keeps it between commands (see Workspaces). */
+  workspace?: (root: string) => Workspace;
 }
 
 class Ctx {
@@ -115,7 +120,7 @@ class Ctx {
 
   /** The code analysis, loaded only by commands that need it: list and search read the store alone. */
   get lib(): Library {
-    return (this.library ??= new Library(openWorkspace(this.root), this.store));
+    return (this.library ??= new Library(this.io.workspace?.(this.root) ?? openWorkspace(this.root), this.store));
   }
 
   /** A path from the workspace root. Relative paths are taken from the cwd, then from the root. */
@@ -317,6 +322,37 @@ function toJson(r: Resolved, code: boolean) {
   };
 }
 
+/** Registers every component scan lists, so any project has a library in one call; notes can come later. */
+function addAll(ctx: Ctx, pos: string[], flags: Flags): void {
+  const per = ["root", "name", "note", "alias", "pin", "example"].filter((f) => flags.has(f));
+  if (pos.length || per.length) throw new Fail(`add --all registers everything scan lists, so it takes no ${pos.length ? "root" : `--${per[0]}`}`, 2);
+  const taken = new Set(ctx.store.all().map((e) => e.slug));
+  const now = new Date().toISOString();
+  const added: Resolved[] = [];
+  for (const c of ctx.lib.unregistered()) {
+    const slug = suggest(c, taken);
+    const entry: Entry = {
+      slug,
+      name: humanize(slug),
+      aliases: [],
+      note: "",
+      tags: flags.list("tags", true),
+      root: { file: c.file, symbol: c.symbol },
+      pins: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const r = ctx.lib.register(entry);
+    if (r) added.push(r);
+  }
+  ctx.print(
+    added.map((r) => toJson(r, false)),
+    added.length
+      ? [...added.map((r) => `added ${catalogLine(r.entry)}`), "", `${added.length} added. Give each a note: myc edit <slug> --note "<what it is>"`]
+      : "every exported component is already registered",
+  );
+}
+
 // ── commands ─────────────────────────────────────────────────────────
 
 type Run = (ctx: Ctx, pos: string[], flags: Flags) => number | void;
@@ -380,8 +416,9 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
   },
 
   add: {
-    flags: ["root", "name", "note", "tags", "alias", "pin", "example"],
+    flags: ["root", "name", "note", "tags", "alias", "pin", "example", "all"],
     run(ctx, pos, flags) {
+      if (flags.has("all")) return addAll(ctx, pos, flags);
       let slug = pos.find((p) => SLUG.test(p));
       const spec = flags.one("root") ?? pos.find((p) => p !== slug);
       if (!spec || pos.length > 2) throw new Fail("usage: myc add [<slug>] <file[#Symbol]> [--note <text>]", 2);
@@ -505,6 +542,10 @@ export function run(argv: string[], io: Io = { out: (t) => console.log(t), err: 
     const { pos, flags } = parse(argv);
     json = flags.has("json");
     const [name, ...rest] = pos;
+    if (name === "version" || (flags.has("version") && !name)) {
+      io.out(pkg.version);
+      return 0;
+    }
     if (!name || name === "help" || flags.has("help")) {
       io.out(HELP);
       return 0;

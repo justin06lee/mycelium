@@ -4,7 +4,7 @@ import type { BunPlugin } from "bun";
 import { ts } from "ts-morph";
 import { wailsFrontend } from "./adapters/composite.ts";
 import { Library } from "./engine.ts";
-import { openWorkspace } from "./index.ts";
+import { openWorkspace } from "./open.ts";
 import { Store } from "./store.ts";
 import { Styles } from "./styles.ts";
 import type { Candidate, Config, Entry } from "./types.ts";
