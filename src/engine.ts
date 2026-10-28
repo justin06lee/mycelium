@@ -46,7 +46,8 @@ export class Library {
     const claimed = new Set<string>();
     const lost: Entry[] = [];
     for (const e of this.entries) {
-      if (exists.has(key(e.root))) {
+      // Roots needn't be components: a hook or a helper can be registered too, it just won't relink.
+      if (exists.has(key(e.root)) || this.ws.rootShape(e.root)) {
         this.located.set(e.slug, { root: e.root });
         claimed.add(key(e.root));
       } else lost.push(e);
@@ -123,7 +124,27 @@ export class Library {
       updatedAt: new Date().toISOString(),
     };
     this.store.put(entry);
+    const i = this.entries.findIndex((e) => e.slug === entry.slug);
+    if (i >= 0) this.entries[i] = entry;
+    this.located.set(entry.slug, { root: entry.root });
     return entry;
+  }
+
+  /** The slug registered at a root, wherever the entry's root has moved to. */
+  slugAt(root: RootRef): string | undefined {
+    for (const [slug, l] of this.located) if (l.root && key(l.root) === key(root)) return slug;
+    return undefined;
+  }
+
+  /** Adds or replaces an entry and records its fingerprint straight away. */
+  register(entry: Entry): Resolved | undefined {
+    const i = this.entries.findIndex((e) => e.slug === entry.slug);
+    if (i >= 0) this.entries[i] = entry;
+    else this.entries.push(entry);
+    this.located.set(entry.slug, { root: entry.root });
+    const r = this.resolve(entry.slug);
+    if (!r?.slice) return undefined;
+    return { ...r, entry: this.record(r), status: "ok", drift: undefined };
   }
 
   /** Components in the code that aren't in the library yet. */

@@ -12,6 +12,7 @@ export type CandidateKind = "screen" | "layout" | "component";
 export interface Candidate extends RootRef {
   kind: CandidateKind;
   exported: boolean;
+  default: boolean;
   line: number;
 }
 

@@ -226,7 +226,14 @@ export class TsWorkspace implements Workspace {
       const file = this.rel(path);
       for (const d of this.index(sf).decls.values()) {
         if (!this.isComponent(d)) continue;
-        out.push({ file, symbol: d.name, kind: this.kindOf(file, d), exported: d.exported, line: d.stmt.getStartLineNumber() });
+        out.push({
+          file,
+          symbol: d.name,
+          kind: this.kindOf(file, d),
+          exported: d.exported,
+          default: d.default,
+          line: d.stmt.getStartLineNumber(),
+        });
       }
     }
     return out.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
@@ -482,16 +489,24 @@ export class TsWorkspace implements Workspace {
       const text = sf.getFullText();
       return { file, kind: "code", text, hash: hash(codeTokens(text).join(" ")) };
     }
+    // Consecutive kept statements form one range, blank lines between them included; anything left out splits it.
+    const kept = new Set(parts);
     const ranges: [number, number][] = [];
-    for (const s of parts) {
+    let open = false;
+    for (const s of statements) {
+      if (!kept.has(s)) {
+        open = false;
+        continue;
+      }
       const start = sf.getLineAndColumnAtPos(s.getStart(true)).line;
       const end = s.getEndLineNumber();
       const last = ranges[ranges.length - 1];
-      if (last && start <= last[1] + 2) last[1] = end;
+      if (open && last) last[1] = end;
       else ranges.push([start, end]);
+      open = true;
     }
     const lines = sf.getFullText().split("\n");
-    const text = ranges.map(([a, b]) => lines.slice(a - 1, b).join("\n")).join("\n\n");
+    const text = ranges.map(([a, b]) => lines.slice(a - 1, b).join("\n")).join("\n// …\n");
     const tokens = parts.flatMap((s) => codeTokens(s.getText(true)));
     return { file, kind: "code", ranges, text, hash: hash(tokens.join(" ")) };
   }
