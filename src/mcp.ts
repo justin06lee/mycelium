@@ -6,6 +6,7 @@ import pkg from "../package.json" with { type: "json" };
 import { run } from "./cli.ts";
 import type { Playground } from "./play.ts";
 import { findRoot, Store } from "./store.ts";
+import { Workspaces } from "./workspaces.ts";
 
 const INSTRUCTIONS = `mycelium keeps a library of a project's UI components: each one has a slug, a name, a note and a root declaration (file#Symbol). The files it spans, the files it shares with other code and the components it renders are traced from the code on every call, so they are never stale.
 Start with list to see what exists, or search for what you need, then show to read a component's code from every file it spans, instead of searching the codebase. Use scan to find components that aren't registered yet and add to register one. After editing code, check finds every component again and reports what changed, moved or is gone; check with update records the new state.
@@ -29,11 +30,14 @@ export function server(cwd: string): McpServer {
   const mcp = new McpServer({ name: "mycelium", version: pkg.version }, { instructions: INSTRUCTIONS });
   // Playgrounds started by the play tool, one per project, stopped when the client goes away.
   const playgrounds = new Map<string, Playground>();
+  // Each project's analysis stays loaded between calls until its code changes.
+  const workspaces = new Workspaces();
   const closed = mcp.server.onclose;
   mcp.server.onclose = () => {
     closed?.();
     for (const p of playgrounds.values()) p.stop();
     playgrounds.clear();
+    workspaces.close();
   };
 
   const call = (a: Args, command: string, flags: [string, string | boolean | string[] | undefined][], pos: string[] = []): CallToolResult => {
@@ -49,6 +53,7 @@ export function server(cwd: string): McpServer {
       out: (t) => (text += t),
       err: (t) => (error += t.replace(/^myc: /, "")),
       result: (data, t) => (text = a.json ? JSON.stringify(data, null, 2) : t),
+      workspace: (root) => workspaces.get(root),
     });
     if (error) return { content: [{ type: "text", text: error }], isError: true };
     return { content: [{ type: "text", text }] };
@@ -99,9 +104,10 @@ export function server(cwd: string): McpServer {
     "add",
     {
       description:
-        "Register a component by its root declaration. Only the root is stored; its files are traced from the code. Give it a name a person would use and a one-line note.",
+        "Register a component by its root declaration. Only the root is stored; its files are traced from the code. Give it a name a person would use and a one-line note. With all, registers every component scan lists under its suggested slug instead.",
       inputSchema: {
-        root: z.string().describe("file or file#Symbol, from the project root"),
+        root: z.string().optional().describe("file or file#Symbol, from the project root; required unless all is set"),
+        all: z.boolean().optional().describe("Register everything scan lists, with suggested slugs and no notes"),
         slug: z.string().optional().describe("Lowercase words joined by dashes; suggested from the code when left out"),
         name: z.string().optional(),
         note: z.string().optional().describe("One line on what it is"),
@@ -119,6 +125,7 @@ export function server(cwd: string): McpServer {
         a,
         "add",
         [
+          ["all", a.all],
           ["root", a.root],
           ["name", a.name],
           ["note", a.note],
