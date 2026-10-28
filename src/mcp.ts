@@ -4,20 +4,37 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import pkg from "../package.json" with { type: "json" };
 import { run } from "./cli.ts";
+import type { Playground } from "./play.ts";
+import { findRoot, Store } from "./store.ts";
 
 const INSTRUCTIONS = `mycelium keeps a library of a project's UI components: each one has a slug, a name, a note and a root declaration (file#Symbol). The files it spans, the files it shares with other code and the components it renders are traced from the code on every call, so they are never stale.
 Start with list to see what exists, or search for what you need, then show to read a component's code from every file it spans, instead of searching the codebase. Use scan to find components that aren't registered yet and add to register one. After editing code, check finds every component again and reports what changed, moved or is gone; check with update records the new state.
+play serves every component rendered live from the code, with its examples (named prop sets set through add or edit), and returns their URLs to open in a browser.
 Every tool takes dir, the project directory; it defaults to the directory the server was started in.`;
 
 const dir = z.string().optional().describe("Project directory; defaults to where the server was started");
 const json = z.boolean().optional().describe("Return the result as JSON instead of text");
 const list = (what: string) => z.array(z.string()).optional().describe(what);
+const examples = (what: string) =>
+  z
+    .array(z.object({ name: z.string(), props: z.record(z.string(), z.unknown()).optional() }))
+    .optional()
+    .describe(what);
+const exampleFlags = (xs?: { name: string; props?: Record<string, unknown> }[]) => xs?.map((x) => `${x.name}=${JSON.stringify(x.props ?? {})}`);
 
 type Args = { dir?: string; json?: boolean };
 
 /** The MCP server: each tool runs the matching myc command, so both stay one implementation. */
 export function server(cwd: string): McpServer {
   const mcp = new McpServer({ name: "mycelium", version: pkg.version }, { instructions: INSTRUCTIONS });
+  // Playgrounds started by the play tool, one per project, stopped when the client goes away.
+  const playgrounds = new Map<string, Playground>();
+  const closed = mcp.server.onclose;
+  mcp.server.onclose = () => {
+    closed?.();
+    for (const p of playgrounds.values()) p.stop();
+    playgrounds.clear();
+  };
 
   const call = (a: Args, command: string, flags: [string, string | boolean | string[] | undefined][], pos: string[] = []): CallToolResult => {
     const argv = ["-C", a.dir ?? cwd, command];
@@ -91,6 +108,7 @@ export function server(cwd: string): McpServer {
         tags: list("Tags"),
         aliases: list("Other names people use for it"),
         pins: list("Files to attach by hand that tracing can't see, such as global CSS"),
+        examples: examples("Named prop sets to render it with in play, e.g. [{name: 'empty', props: {items: []}}]"),
         dir,
         json,
       },
@@ -107,6 +125,7 @@ export function server(cwd: string): McpServer {
           ["tags", a.tags?.join(",")],
           ["alias", a.aliases],
           ["pin", a.pins],
+          ["example", exampleFlags(a.examples)],
         ],
         a.slug ? [a.slug] : [],
       ),
@@ -114,7 +133,7 @@ export function server(cwd: string): McpServer {
   mcp.registerTool(
     "edit",
     {
-      description: "Change a registered component: its name, note, tags or aliases, its root, or its pinned files.",
+      description: "Change a registered component: its name, note, tags or aliases, its root, its pinned files or its examples.",
       inputSchema: {
         slug: z.string(),
         name: z.string().optional(),
@@ -125,6 +144,8 @@ export function server(cwd: string): McpServer {
         root: z.string().optional().describe("New root, file or file#Symbol"),
         pin: list("Files to pin"),
         unpin: list("Files to unpin"),
+        examples: examples("Examples to add, replacing any of the same name"),
+        unexample: list("Names of examples to remove"),
         dir,
         json,
       },
@@ -143,6 +164,8 @@ export function server(cwd: string): McpServer {
           ["root", a.root],
           ["pin", a.pin],
           ["unpin", a.unpin],
+          ["example", exampleFlags(a.examples)],
+          ["unexample", a.unexample],
         ],
         [a.slug],
       ),
@@ -166,9 +189,36 @@ export function server(cwd: string): McpServer {
     },
     (a) => call(a, "remove", [], a.slugs),
   );
+  mcp.registerTool(
+    "play",
+    {
+      description:
+        "Serve every registered component rendered live from the code, each with its examples, and return the URLs. The pages rebuild on every load and reload themselves when the code changes. It keeps running until the client disconnects.",
+      inputSchema: { port: z.number().int().optional().describe("Defaults to 4777, or any free port when that's taken"), dir, json },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async (a): Promise<CallToolResult> => {
+      const root = findRoot(a.dir ?? cwd);
+      try {
+        let p = playgrounds.get(root);
+        if (!p) {
+          const { play } = await import("./play.ts");
+          playgrounds.set(root, (p = play(root, { port: a.port })));
+        }
+        const components = new Store(root).all().map((e) => ({ slug: e.slug, url: `${p.url}c/${e.slug}` }));
+        const text = [`${p.url}  every component, side by side`, ...components.map((c) => `${c.url}  ${c.slug}`)].join("\n");
+        return { content: [{ type: "text", text: a.json ? JSON.stringify({ url: p.url, components }, null, 2) : text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true };
+      }
+    },
+  );
   return mcp;
 }
 
 export async function serve(cwd: string): Promise<void> {
-  await server(cwd).connect(new StdioServerTransport());
+  const mcp = server(cwd);
+  await mcp.connect(new StdioServerTransport());
+  // The transport doesn't notice its client hanging up, and a running playground would keep the process alive.
+  process.stdin.once("end", () => void mcp.close());
 }

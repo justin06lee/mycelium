@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  type FunctionLikeDeclaration,
   type ImportDeclaration,
   Node,
   Project,
@@ -10,7 +11,7 @@ import {
   ts,
 } from "ts-morph";
 import { codeTokens, hash, normalizeStyle } from "../../fingerprint.ts";
-import type { Candidate, CandidateKind, Chunk, RootRef, Slice, SliceOptions, Workspace } from "../../types.ts";
+import type { Candidate, CandidateKind, Chunk, Prop, RootRef, Slice, SliceOptions, Workspace } from "../../types.ts";
 
 const SKIP_DIRS = new Set([
   "node_modules", "dist", "build", "out", ".next", ".turbo", ".vercel",
@@ -467,6 +468,23 @@ export class TsWorkspace implements Workspace {
     return decl && this.shapeOf(decl);
   }
 
+  props(root: RootRef): Prop[] | undefined {
+    const sf = this.files.get(this.abs(root.file));
+    const decl = sf && this.findDecl(sf, root.symbol);
+    const fn = decl && functionOf(decl);
+    if (!fn) return undefined;
+    const param = fn.getParameters()[0];
+    if (!param) return [];
+    return param
+      .getType()
+      .getProperties()
+      .map((p) => {
+        const type = p.getTypeAtLocation(param).getNonNullableType();
+        const types = type.isUnion() ? type.getUnionTypes() : [type];
+        return { name: p.getName(), optional: p.isOptional(), callable: types.some((t) => t.getCallSignatures().length > 0) };
+      });
+  }
+
   private shapeOf(decl: Decl): { shape: string; rootText: string } {
     const tokens = codeTokens(decl.stmt.getText());
     return {
@@ -527,4 +545,15 @@ export class TsWorkspace implements Workspace {
     }
     return { file, kind: "asset", hash: hash(readFileSync(abs).toString("base64")) };
   }
+}
+
+/** The function a component declaration renders with, unwrapping memo() and forwardRef(). */
+function functionOf(decl: Decl): FunctionLikeDeclaration | undefined {
+  const s = decl.stmt;
+  let node: Node | undefined;
+  if (Node.isFunctionDeclaration(s)) node = s;
+  else if (Node.isExportAssignment(s)) node = s.getExpression();
+  else if (Node.isVariableStatement(s)) node = s.getDeclarations().find((v) => v.getName() === decl.name)?.getInitializer();
+  while (node && Node.isCallExpression(node)) node = node.getArguments().find((a) => Node.isArrowFunction(a) || Node.isFunctionExpression(a) || Node.isCallExpression(a));
+  return node && (Node.isFunctionDeclaration(node) || Node.isArrowFunction(node) || Node.isFunctionExpression(node)) ? node : undefined;
 }

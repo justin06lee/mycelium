@@ -29,7 +29,7 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 
 test("the tools mirror the commands", async () => {
   const { tools } = await client.listTools();
-  expect(tools.map((t) => t.name).sort()).toEqual(["add", "check", "edit", "list", "remove", "scan", "search", "show"]);
+  expect(tools.map((t) => t.name).sort()).toEqual(["add", "check", "edit", "list", "play", "remove", "scan", "search", "show"]);
   expect(client.getInstructions()).toContain("show to read a component's code");
 });
 
@@ -69,4 +69,13 @@ test("failures come back as tool errors with the command's message", async () =>
   const r = await call("show", { slugs: ["crad"] });
   expect(r).toEqual({ error: true, text: "no component named crad; did you mean card?" });
   expect((await call("add", { root: "nope.tsx" })).error).toBe(true);
+});
+
+test("play serves the library and stops with the client", async () => {
+  await call("add", { root: "src/components/Card.tsx", examples: [{ name: "basic", props: { title: "Hi" } }] });
+  const played = JSON.parse((await call("play", { port: 0, json: true })).text);
+  expect(played.components).toEqual([{ slug: "card", url: `${played.url}c/card` }]);
+  expect((await fetch(played.components[0].url)).status).toBe(200);
+  await client.close();
+  await expect(fetch(played.url)).rejects.toThrow();
 });
