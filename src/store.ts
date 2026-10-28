@@ -2,12 +2,15 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from "node:path";
 import type { Entry } from "./types.ts";
 
-const MARKERS = [".mycelium", ".git", "package.json", "Package.swift"];
+const MARKERS = [".mycelium", ".git", "package.json", "go.mod", "go.work", "wails.json", "Package.swift"];
 
 /** The nearest directory at or above `from` that looks like a project root. */
 export function findRoot(from: string): string {
   for (let dir = from; ; dir = dirname(dir)) {
-    if (MARKERS.some((m) => existsSync(join(dir, m)))) return dir;
+    if (MARKERS.some((m) => existsSync(join(dir, m)))) {
+      // A Wails frontend has its own package.json, but the project is the app around it.
+      return existsSync(join(dirname(dir), "wails.json")) ? dirname(dir) : dir;
+    }
     if (dirname(dir) === dir) return from;
   }
 }

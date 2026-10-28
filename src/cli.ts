@@ -154,7 +154,12 @@ function catalogLine(e: Entry): string {
 /** A slug for a candidate: its name for components, its route for Next.js pages and layouts. */
 function suggest(c: Candidate, taken: Set<string>): string {
   let base: string;
-  if (c.kind === "component") {
+  if (c.file.endsWith(".go")) {
+    // A view method is named for itself, not its receiver; a model called just "model" by its package.
+    const name = c.symbol.slice(c.symbol.lastIndexOf(".") + 1);
+    base = words(name).join("-");
+    if (base === "model") base = [...words(c.file.split("/").at(-2) ?? ""), "model"].join("-");
+  } else if (c.kind === "component") {
     base = words(c.symbol === "default" ? basename(c.file, extname(c.file)) : c.symbol).join("-");
   } else {
     const parts = c.file.split("/");
