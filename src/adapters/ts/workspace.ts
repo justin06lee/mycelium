@@ -67,8 +67,13 @@ export class TsWorkspace implements Workspace {
   private edgeCache = new Map<string, Edge[]>();
   private reverse?: Map<string, { from: string; edge: Edge }[]>;
 
-  constructor(readonly root: string) {
-    const configs = tsconfigs(root);
+  /** `dir` is where the TS code lives when it isn't the root, such as a Wails app's frontend; paths stay root-relative. */
+  constructor(
+    readonly root: string,
+    opts: { dir?: string } = {},
+  ) {
+    const base = opts.dir ? join(root, opts.dir) : root;
+    const configs = tsconfigs(base);
     const projects: Project[] = [];
     for (const tsConfigFilePath of configs) {
       try {
@@ -86,7 +91,7 @@ export class TsWorkspace implements Workspace {
           moduleResolution: ts.ModuleResolutionKind.Bundler,
         },
       });
-      project.addSourceFilesAtPaths([`${root}/**/*.{ts,tsx,js,jsx}`, `!${root}/**/node_modules/**`]);
+      project.addSourceFilesAtPaths([`${base}/**/*.{ts,tsx,js,jsx}`, `!${base}/**/node_modules/**`]);
       projects.push(project);
     }
     for (const project of projects) {

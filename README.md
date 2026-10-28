@@ -127,15 +127,15 @@ myc play
 - `/` shows every component side by side; `/c/<slug>` renders one with all its examples; `/c/<slug>?example=<name>` renders just one, for embedding; `/api/components` lists them as JSON. Rendered pages post `{ myc: { slug, height } }` to their parent so an embedding iframe can fit its content.
 - **Examples** are named prop sets stored with the entry. For props JSON can't express (JSX children, callbacks inside objects), export components from `.mycelium/examples/<slug>.tsx`; each named export is one more example.
 - **Callbacks** an example leaves out are filled in from the component's prop types with functions that log their calls (`settings-panel · onPatch {…}`), so clicking around doesn't crash.
-- **Styles** go through the project's own pipeline: its PostCSS config (Tailwind v3/v4, autoprefixer), or Tailwind v4's compiler when it's wired through Vite. CSS modules work, and the global CSS the app's entry imports (`app/layout.tsx`, `pages/_app`, `src/main.tsx`, the Electron renderer's `main.tsx`) is loaded on every page.
-- **Framework stand-ins.** `next/link`, `next/image`, `next/navigation` and `next/router` are replaced with plain elements and inert hooks. `"use server"` modules become stubs, so server code never reaches the browser. Async server components are awaited in the browser, and screens get Next's `params`/`searchParams` promises. Desktop bridges (`window.api`, `window.electron`, Wails' `window.go`/`window.runtime`, Tauri's internals, and whatever an Electron preload exposes with `contextBridge`) resolve calls to `undefined`.
+- **Styles** go through the project's own pipeline: its PostCSS config (Tailwind v3/v4, autoprefixer), or Tailwind v4's compiler when it's wired through Vite. CSS modules work, and the global CSS the app's entry imports (`app/layout.tsx`, `pages/_app`, `src/main.tsx`, the Electron renderer's or Wails frontend's `main.tsx`) is loaded on every page.
+- **Framework stand-ins.** `next/link`, `next/image`, `next/navigation` and `next/router` are replaced with plain elements and inert hooks. `"use server"` modules become stubs, so server code never reaches the browser. Async server components are awaited in the browser, and screens get Next's `params`/`searchParams` promises. Desktop bridges (`window.api`, `window.electron`, Wails' `window.go`/`window.runtime`, Tauri's internals, and whatever an Electron preload exposes with `contextBridge`) log each call with its path, like `[myc] go.main.App.Greet Ana`, and resolve to `undefined`.
 - **Fake data.** For components that load data from a backend, `.mycelium/setup.ts` runs before anything else: set `window.myApi = { … }` there. A provider wrapper and extra CSS go in `.mycelium/config.json`:
 
 ```json
 { "render": { "wrapper": "src/Providers.tsx#Providers", "css": ["src/app/globals.css"], "setup": [".mycelium/setup.ts"] } }
 ```
 
-React and the rest come from the project's own `node_modules`, so install its dependencies first.
+React and the rest come from the project's own `node_modules` (a Wails app's `frontend/node_modules`), so install its dependencies first. Go terminal views don't render here: a browser can't run them.
 
 ## How it works
 
@@ -152,15 +152,28 @@ React and the rest come from the project's own `node_modules`, so install its de
 
 Splitting a component into new files needs no relinking: the new files are traced from the root like the old ones.
 
+**Go.** A Go package shares one scope across its files, so the Go adapter slices by declaration instead of by file. It parses with tree-sitter (embedded in the binary, no Go toolchain needed). In a package that imports Bubble Tea, Lip Gloss or Bubbles, a component is a type with a `View` method (a model with `Init` and `Update` too is a screen), or a function or method returning `string` that draws: its name ends in `view`, or it calls `Render`, `View`, `JoinVertical`/`JoinHorizontal` or `Place`. A type comes with all its methods. From there the slice follows package-level names, other local packages' names, and method calls whose receiver type it can follow through receivers, parameters, struct fields, `range` and `:=`. The same ownership rule applies per declaration: one belongs to the component only if everything that refers to it is inside, and the rest are listed as `shared` by `file#name`. A method's receiver isn't a reference, so `Model.chatView` doesn't drag in the whole model.
+
 ## Frameworks
 
 One TypeScript adapter covers the React stacks: Next.js (app and pages routers, `@/` aliases), Electron (the renderer is where the JSX is, and electron-vite's split tsconfigs are followed) and Tauri (a Vite frontend, with the Rust side skipped). Plain Vite or CRA React projects work the same way.
+
+Go is covered for terminal UIs and Wails. Bubble Tea apps get their models, sub-models and view functions as components; in a single-model app like most, the views are methods, so `Model.welcomeView` is registered on its own:
+
+```console
+$ myc scan
+internal/ui/header.go#Model.header  component           → header
+internal/ui/list.go#list            component           → list
+internal/ui/model.go#Model          screen              → ui-model
+```
+
+A Wails app (a `wails.json` root) is both at once: its `frontend/` goes through the TypeScript adapter, and the Go methods a component calls through the generated `wailsjs/go/<package>/<Struct>` bindings join that component's slice, with the Go helpers only they use. Editing `Greet` in `app.go` shows up as a change to the frontend component that calls it. A repo with both a `go.mod` and a `package.json` gets both adapters side by side.
 
 Swift/SwiftUI is planned as a second adapter behind the same `Workspace` interface. Swift has no imports between files in a module, so it will resolve names module-wide, and `#Preview` blocks will serve as each view's example.
 
 ## Storage
 
-Each component is one file, `.mycelium/components/<slug>.json`, holding its name, note, tags, aliases, root (`file` + `symbol`), pins, examples and last recorded fingerprint. Commit the directory: one file per component keeps merge conflicts rare and diffs readable. `.mycelium/config.json`, `.mycelium/setup.ts` and `.mycelium/examples/` hold playground settings and are worth committing too. `.mycelium/play/` is generated and ignores itself.
+Each component is one file, `.mycelium/components/<slug>.json`, holding its name, note, tags, aliases, root (`file` + `symbol`), pins, examples and last recorded fingerprint. Commit the directory: one file per component keeps merge conflicts rare and diffs readable. `.mycelium/config.json`, `.mycelium/setup.ts` and `.mycelium/examples/` hold playground settings and are worth committing too. `.mycelium/play/` is generated and ignores itself; a Wails app's generated entries go in `frontend/node_modules/.cache/myc-play/` instead, so React resolves from the frontend.
 
 ## As a library
 
@@ -180,7 +193,8 @@ for (const chunk of dialog?.slice?.chunks ?? []) console.log(chunk.file, chunk.r
 
 ## Limits
 
-- Only TypeScript/JavaScript React for now.
+- TypeScript/JavaScript React and Go (Bubble Tea, Wails) so far.
+- Go is read without a type checker. A method call on a value whose type it can't follow is linked to the one local type with that method name, if there's only one; calls through interfaces aren't followed.
 - Roots that aren't components (a hook, a helper) can be registered and shown, but they don't relink after a rename.
 - Global CSS selectors and anything wired up at runtime (dynamic imports by string, DI containers) aren't traced. Pin those files.
 - The playground renders what a component can do in a browser. Data a component loads from a server or the Electron main process is `undefined` unless `.mycelium/setup.ts` fakes it, and `next/font` fonts don't load.
