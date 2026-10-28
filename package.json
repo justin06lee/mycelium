@@ -1,0 +1,22 @@
+{
+  "name": "mycelium",
+  "version": "0.1.0",
+  "description": "Live, named handles on the pieces of a codebase, for agents",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "myc": "src/cli.ts"
+  },
+  "scripts": {
+    "build": "bun build src/cli.ts --compile --outfile bin/myc",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ts-morph": "^28.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^6.0.2"
+  }
+}
