@@ -365,8 +365,11 @@ export function play(root: string, opts: { port?: number; hostname?: string } = 
       .find((c) => c.file === r.root.file && c.symbol === r.root.symbol);
     if (!c) return `${r.root.file}#${r.root.symbol} isn't a component, so there's nothing to render`;
     if (!c.exported) return `${r.root.file}#${r.root.symbol} isn't exported, so the playground can't import it`;
-    if (!/\.[cm]?[jt]sx?$/.test(c.file)) {
+    if (c.file.endsWith(".go")) {
       return `${slug} is a terminal view written in Go, which a browser can't render; myc show ${slug} prints its code`;
+    }
+    if (c.file.endsWith(".swift")) {
+      return `${slug} is a SwiftUI view: it renders in Xcode's previews, not a browser. Its #Preview blocks are part of myc show ${slug}`;
     }
     mkdirSync(dir, { recursive: true });
     if (!existsSync(join(dir, ".gitignore"))) writeFileSync(join(dir, ".gitignore"), "*\n");

@@ -159,7 +159,7 @@ function suggest(c: Candidate, taken: Set<string>): string {
     const name = c.symbol.slice(c.symbol.lastIndexOf(".") + 1);
     base = words(name).join("-");
     if (base === "model") base = [...words(c.file.split("/").at(-2) ?? ""), "model"].join("-");
-  } else if (c.kind === "component") {
+  } else if (c.kind === "component" || !/\.[cm]?[jt]sx?$/.test(c.file)) {
     base = words(c.symbol === "default" ? basename(c.file, extname(c.file)) : c.symbol).join("-");
   } else {
     const parts = c.file.split("/");
