@@ -5,7 +5,7 @@ import { Library, type Resolved } from "./engine.ts";
 import { openWorkspace } from "./index.ts";
 import { search, words } from "./search.ts";
 import { findRoot, Store } from "./store.ts";
-import type { Candidate, Chunk, Entry, RootRef } from "./types.ts";
+import type { Candidate, Chunk, Entry, Example, RootRef } from "./types.ts";
 
 const HELP = `myc: live, named handles on the components of a codebase
 
@@ -17,10 +17,13 @@ usage: myc [-C <dir>] <command> [options] [--json]
   scan [--all]                  components in the code that aren't registered yet
   add [<slug>] <file[#Symbol]>  register a component by its root declaration
       [--name <text>] [--note <text>] [--tags a,b] [--alias <name>] [--pin <file>]
+      [--example '<name>={"prop":1}']
   edit <slug>                   change an entry: --name --note --tags --alias --unalias
                                 --root <file[#Symbol]> --pin <file> --unpin <file>
+                                --example '<name>={json props}' --unexample <name>
   check [--update]              re-find every component after edits; --update records them
   remove <slug>                 unregister a component (the code is untouched)
+  play [--port 4777]            render every component live from the code, with its examples
   mcp                           serve these commands as MCP tools over stdio
 
   -C <dir>   run as if started in <dir>
@@ -172,6 +175,29 @@ function suggest(c: Candidate, taken: Set<string>): string {
   return slug;
 }
 
+/** `--example 'name={"title":"Hi"}'`: a named set of props; a bare name renders with none. */
+function example(spec: string): Example {
+  const eq = spec.indexOf("=");
+  const name = (eq < 0 ? spec : spec.slice(0, eq)).trim();
+  if (!name) throw new Fail(`an example needs a name: --example 'empty={"items":[]}'`, 2);
+  if (eq < 0) return { name, props: {} };
+  let props: unknown;
+  try {
+    props = JSON.parse(spec.slice(eq + 1));
+  } catch {
+    throw new Fail(`${name}'s props aren't valid JSON: ${spec.slice(eq + 1)}`, 2);
+  }
+  if (!props || typeof props !== "object" || Array.isArray(props)) throw new Fail(`${name}'s props must be a JSON object`, 2);
+  return { name, props: props as Record<string, unknown> };
+}
+
+/** Examples with later ones replacing earlier ones of the same name. */
+function mergeExamples(base: Example[], add: Example[], drop: Set<string> = new Set()): Example[] {
+  const byName = new Map(base.map((e) => [e.name, e]));
+  for (const e of add) byName.set(e.name, e);
+  return [...byName.values()].filter((e) => !drop.has(e.name));
+}
+
 function ranges(c: Chunk): string {
   return c.ranges ? `:${c.ranges.map(([a, b]) => (a === b ? `${a}` : `${a}-${b}`)).join(",")}` : "";
 }
@@ -256,6 +282,7 @@ function describe(r: Resolved, code: boolean): string[] {
   if (e.pins.length) lines.push(...field("pinned", e.pins));
   if (e.tags.length) lines.push(...field("tags", [e.tags.join(", ")]));
   if (e.aliases.length) lines.push(...field("aliases", [e.aliases.join(", ")]));
+  if (e.examples?.length) lines.push(...field("examples", e.examples.map((x) => `${x.name} ${JSON.stringify(x.props)}`)));
   if (code && r.slice) {
     for (const c of r.slice.chunks) {
       lines.push("", `── ${c.file}${ranges(c)}`, c.text?.replace(/\n+$/, "") ?? `(binary ${c.kind}, not shown)`);
@@ -348,7 +375,7 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
   },
 
   add: {
-    flags: ["root", "name", "note", "tags", "alias", "pin"],
+    flags: ["root", "name", "note", "tags", "alias", "pin", "example"],
     run(ctx, pos, flags) {
       let slug = pos.find((p) => SLUG.test(p));
       const spec = flags.one("root") ?? pos.find((p) => p !== slug);
@@ -371,6 +398,7 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
         tags: flags.list("tags", true),
         root,
         pins: flags.list("pin").map((p) => ctx.path(p)),
+        ...(flags.has("example") ? { examples: mergeExamples([], flags.list("example").map(example)) } : {}),
         createdAt: now,
         updatedAt: now,
       };
@@ -381,10 +409,12 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
   },
 
   edit: {
-    flags: ["root", "name", "note", "tags", "alias", "unalias", "pin", "unpin"],
+    flags: ["root", "name", "note", "tags", "alias", "unalias", "pin", "unpin", "example", "unexample"],
     run(ctx, pos, flags) {
       const slug = pos[0];
-      if (!slug || pos.length > 1) throw new Fail("usage: myc edit <slug> [--name --note --tags --alias --unalias --root --pin --unpin]", 2);
+      if (!slug || pos.length > 1) {
+        throw new Fail("usage: myc edit <slug> [--name --note --tags --alias --unalias --root --pin --unpin --example --unexample]", 2);
+      }
       const before = ctx.store.get(slug) ?? notFound(ctx, slug);
       if (flags.names().every((n) => GLOBAL.includes(n))) throw new Fail("nothing to change; see myc help", 2);
       const e: Entry = { ...before, updatedAt: new Date().toISOString() };
@@ -397,6 +427,9 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
       e.aliases = [...new Set([...e.aliases, ...flags.list("alias")])].filter((a) => !unalias.has(a));
       const unpin = new Set(flags.list("unpin").map((p) => ctx.path(p)));
       e.pins = [...new Set([...e.pins, ...flags.list("pin").map((p) => ctx.path(p))])].filter((p) => !unpin.has(p));
+      if (flags.has("example") || flags.has("unexample")) {
+        e.examples = mergeExamples(e.examples ?? [], flags.list("example").map(example), new Set(flags.list("unexample")));
+      }
       const spec = flags.one("root");
       if (spec) {
         e.root = pickRoot(ctx, spec);
@@ -487,14 +520,32 @@ export function run(argv: string[], io: Io = { out: (t) => console.log(t), err: 
 
 if (import.meta.main) {
   const argv = process.argv.slice(2);
-  // The MCP server runs until its client hangs up, so it lives outside the one-shot commands.
-  let mcp: string | undefined;
+  // The MCP server and the playground run until stopped, so they live outside the one-shot commands.
+  let serve: { name: string; root: string; port?: number } | undefined;
   try {
     const { pos, flags } = parse(argv);
-    if (pos[0] === "mcp") mcp = resolve(flags.one("C") ?? process.cwd());
-  } catch {
+    if ((pos[0] === "mcp" || pos[0] === "play") && !flags.has("help")) {
+      const port = flags.one("port");
+      if (port !== undefined && !/^\d+$/.test(port)) throw new Fail(`--port takes a number: ${port}`, 2);
+      serve = { name: pos[0], root: findRoot(resolve(flags.one("C") ?? process.cwd())), port: port ? Number(port) : undefined };
+    }
+  } catch (err) {
+    if (err instanceof Fail) {
+      console.error(`myc: ${err.message}`);
+      process.exit(err.code);
+    }
     // run() reports the bad arguments.
   }
-  if (mcp) await (await import("./mcp.ts")).serve(mcp);
-  else process.exitCode = run(argv);
+  if (serve?.name === "mcp") await (await import("./mcp.ts")).serve(serve.root);
+  else if (serve?.name === "play") {
+    const { play } = await import("./play.ts");
+    const p = play(serve.root, { port: serve.port });
+    const slugs = new Store(serve.root).all().map((e) => e.slug);
+    console.log(`myc play: ${p.url}  (${slugs.length} components; Ctrl-C stops it)`);
+    for (const slug of slugs) console.log(`  ${p.url}c/${slug}`);
+    process.on("SIGINT", () => {
+      p.stop();
+      process.exit(0);
+    });
+  } else process.exitCode = run(argv);
 }

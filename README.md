@@ -90,17 +90,18 @@ ok        toggle-switch
 | `myc search <words>` | Registered components by name, alias, note, tag or path, with typo suggestions. |
 | `myc show <slug>... [--no-code]` | A component's code from every file it spans, root first, plus what it uses and what uses it. |
 | `myc scan [--all]` | Components in the code that aren't registered yet, with suggested slugs. `--all` includes unexported ones. |
-| `myc add [<slug>] <file[#Symbol]>` | Register a component by its root declaration. With no `#Symbol`, the file's only (or default) component is used. Takes `--name`, `--note`, `--tags a,b`, `--alias <name>`, `--pin <file>` (repeat `--alias` and `--pin` for more than one). |
-| `myc edit <slug>` | Change an entry: `--name --note --tags --alias --unalias --root --pin --unpin`. |
+| `myc add [<slug>] <file[#Symbol]>` | Register a component by its root declaration. With no `#Symbol`, the file's only (or default) component is used. Takes `--name`, `--note`, `--tags a,b`, `--alias <name>`, `--pin <file>` and `--example '<name>={json props}'` (repeat `--alias`, `--pin` and `--example` for more than one). |
+| `myc edit <slug>` | Change an entry: `--name --note --tags --alias --unalias --root --pin --unpin --example --unexample`. |
 | `myc check [--update]` | Re-find every component after edits. `--update` records the new state. Exits 1 if any component is orphaned. |
 | `myc remove <slug>` | Unregister a component. The code is untouched. |
+| `myc play [--port 4777]` | Serve every component rendered live from the code, with its examples. See [Live rendering](#live-rendering). |
 | `myc mcp` | Serve the commands above as MCP tools over stdio. |
 
 Every command takes `--json` for machine-readable output and `-C <dir>` to run against another directory.
 
 ## MCP server
 
-`myc mcp` gives agents the same commands as tools: `list`, `search`, `show`, `scan`, `add`, `edit`, `check` and `remove`. They return the text the CLI prints (pass `json: true` for JSON), and each takes `dir` to point it at a project other than the one the server started in. Errors come back as tool errors with the CLI's message, typo suggestions included.
+`myc mcp` gives agents the same commands as tools: `list`, `search`, `show`, `scan`, `add`, `edit`, `check`, `remove` and `play`, which starts the playground inside the server and returns its URLs (it stops when the client disconnects). They return the text the CLI prints (pass `json: true` for JSON), and each takes `dir` to point it at a project other than the one the server started in. Errors come back as tool errors with the CLI's message, typo suggestions included.
 
 ```sh
 claude mcp add mycelium -- myc mcp
@@ -111,6 +112,30 @@ Or in any client's config:
 ```json
 { "mcpServers": { "mycelium": { "command": "myc", "args": ["mcp"] } } }
 ```
+
+## Live rendering
+
+`myc play` renders every registered component from its actual code, the way a component library's demo pages do. Nothing is a screenshot. Each page is bundled with Bun when it loads, so it always shows the current code, and it reloads itself when a file changes.
+
+```sh
+myc edit card --example 'basic={"title":"Hello"}' --example 'long={"title":"A much longer title"}'
+myc play
+# myc play: http://localhost:4777/  (12 components; Ctrl-C stops it)
+#   http://localhost:4777/c/card
+```
+
+- `/` shows every component side by side; `/c/<slug>` renders one with all its examples; `/c/<slug>?example=<name>` renders just one, for embedding; `/api/components` lists them as JSON. Rendered pages post `{ myc: { slug, height } }` to their parent so an embedding iframe can fit its content.
+- **Examples** are named prop sets stored with the entry. For props JSON can't express (JSX children, callbacks inside objects), export components from `.mycelium/examples/<slug>.tsx`; each named export is one more example.
+- **Callbacks** an example leaves out are filled in from the component's prop types with functions that log their calls (`settings-panel · onPatch {…}`), so clicking around doesn't crash.
+- **Styles** go through the project's own pipeline: its PostCSS config (Tailwind v3/v4, autoprefixer), or Tailwind v4's compiler when it's wired through Vite. CSS modules work, and the global CSS the app's entry imports (`app/layout.tsx`, `pages/_app`, `src/main.tsx`, the Electron renderer's `main.tsx`) is loaded on every page.
+- **Framework stand-ins.** `next/link`, `next/image`, `next/navigation` and `next/router` are replaced with plain elements and inert hooks. `"use server"` modules become stubs, so server code never reaches the browser. Async server components are awaited in the browser, and screens get Next's `params`/`searchParams` promises. Desktop bridges (`window.api`, `window.electron`, Wails' `window.go`/`window.runtime`, Tauri's internals, and whatever an Electron preload exposes with `contextBridge`) resolve calls to `undefined`.
+- **Fake data.** For components that load data from a backend, `.mycelium/setup.ts` runs before anything else: set `window.myApi = { … }` there. A provider wrapper and extra CSS go in `.mycelium/config.json`:
+
+```json
+{ "render": { "wrapper": "src/Providers.tsx#Providers", "css": ["src/app/globals.css"], "setup": [".mycelium/setup.ts"] } }
+```
+
+React and the rest come from the project's own `node_modules`, so install its dependencies first.
 
 ## How it works
 
@@ -135,7 +160,7 @@ Swift/SwiftUI is planned as a second adapter behind the same `Workspace` interfa
 
 ## Storage
 
-Each component is one file, `.mycelium/components/<slug>.json`, holding its name, note, tags, aliases, root (`file` + `symbol`), pins and last recorded fingerprint. Commit the directory: one file per component keeps merge conflicts rare and diffs readable.
+Each component is one file, `.mycelium/components/<slug>.json`, holding its name, note, tags, aliases, root (`file` + `symbol`), pins, examples and last recorded fingerprint. Commit the directory: one file per component keeps merge conflicts rare and diffs readable. `.mycelium/config.json`, `.mycelium/setup.ts` and `.mycelium/examples/` hold playground settings and are worth committing too. `.mycelium/play/` is generated and ignores itself.
 
 ## As a library
 
@@ -151,12 +176,15 @@ for (const chunk of dialog?.slice?.chunks ?? []) console.log(chunk.file, chunk.r
 
 `Library` exposes `resolve`, `resolveAll`, `register`, `record` and `unregistered`, which the CLI is built on.
 
+`play(root, { port })` starts the playground in-process and returns `{ url, stop }`. A component's live render is at `${url}c/<slug>`.
+
 ## Limits
 
 - Only TypeScript/JavaScript React for now.
 - Roots that aren't components (a hook, a helper) can be registered and shown, but they don't relink after a rename.
 - Global CSS selectors and anything wired up at runtime (dynamic imports by string, DI containers) aren't traced. Pin those files.
-- No rendering or screenshots yet.
+- The playground renders what a component can do in a browser. Data a component loads from a server or the Electron main process is `undefined` unless `.mycelium/setup.ts` fakes it, and `next/font` fonts don't load.
+- Examples are JSON, so functions nested inside props objects need an example file.
 
 ## Development
 

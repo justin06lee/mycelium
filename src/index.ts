@@ -6,6 +6,7 @@ import type { Workspace } from "./types.ts";
 export { isTsWorkspace, TsWorkspace } from "./adapters/ts/workspace.ts";
 export { type Relink, type Resolved, type Status, Library } from "./engine.ts";
 export { type Drift, drift, fingerprint, hash, similarity } from "./fingerprint.ts";
+export { entrySource, PLAY_DIR, type Playground, play, readConfig } from "./play.ts";
 export { search, words } from "./search.ts";
 export { findRoot, Store } from "./store.ts";
 export type * from "./types.ts";

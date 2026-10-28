@@ -58,6 +58,15 @@ export interface Workspace {
   usedBy(root: RootRef): string[];
   /** The root declaration's shape and normalized text, without tracing the rest. */
   rootShape(root: RootRef): { shape: string; rootText: string } | undefined;
+  /** The props the root takes, from its declared type, for rendering it; undefined when it can't tell. */
+  props?(root: RootRef): Prop[] | undefined;
+}
+
+export interface Prop {
+  name: string;
+  optional: boolean;
+  /** A function prop, such as onClose: the playground fills these in when an example leaves them out. */
+  callable: boolean;
 }
 
 export interface Fingerprint {
@@ -76,7 +85,27 @@ export interface Entry {
   tags: string[];
   root: RootRef;
   pins: string[];
+  /** Props to render it with in the playground, one set per example. */
+  examples?: Example[];
   fingerprint?: Fingerprint;
   createdAt: string;
   updatedAt: string;
+}
+
+/** A named set of props a component renders with in `myc play`. */
+export interface Example {
+  name: string;
+  props: Record<string, unknown>;
+}
+
+/** .mycelium/config.json: project-wide settings. */
+export interface Config {
+  render?: {
+    /** A provider component every render is wrapped in, as `file#Symbol`. */
+    wrapper?: string;
+    /** Stylesheets loaded on every render, such as the app's global CSS. Defaults to what the app's entry imports. */
+    css?: string[];
+    /** Modules run before anything else, e.g. to fake a desktop app's window.api. Defaults to .mycelium/setup.ts(x). */
+    setup?: string[];
+  };
 }
