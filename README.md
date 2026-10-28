@@ -90,12 +90,27 @@ ok        toggle-switch
 | `myc search <words>` | Registered components by name, alias, note, tag or path, with typo suggestions. |
 | `myc show <slug>... [--no-code]` | A component's code from every file it spans, root first, plus what it uses and what uses it. |
 | `myc scan [--all]` | Components in the code that aren't registered yet, with suggested slugs. `--all` includes unexported ones. |
-| `myc add [<slug>] <file[#Symbol]>` | Register a component by its root declaration. With no `#Symbol`, the file's only (or default) component is used. Takes `--name`, `--note`, `--tags a,b`, `--alias`, `--pin <file>`. |
+| `myc add [<slug>] <file[#Symbol]>` | Register a component by its root declaration. With no `#Symbol`, the file's only (or default) component is used. Takes `--name`, `--note`, `--tags a,b`, `--alias <name>`, `--pin <file>` (repeat `--alias` and `--pin` for more than one). |
 | `myc edit <slug>` | Change an entry: `--name --note --tags --alias --unalias --root --pin --unpin`. |
 | `myc check [--update]` | Re-find every component after edits. `--update` records the new state. Exits 1 if any component is orphaned. |
 | `myc remove <slug>` | Unregister a component. The code is untouched. |
+| `myc mcp` | Serve the commands above as MCP tools over stdio. |
 
 Every command takes `--json` for machine-readable output and `-C <dir>` to run against another directory.
+
+## MCP server
+
+`myc mcp` gives agents the same commands as tools: `list`, `search`, `show`, `scan`, `add`, `edit`, `check` and `remove`. They return the text the CLI prints (pass `json: true` for JSON), and each takes `dir` to point it at a project other than the one the server started in. Errors come back as tool errors with the CLI's message, typo suggestions included.
+
+```sh
+claude mcp add mycelium -- myc mcp
+```
+
+Or in any client's config:
+
+```json
+{ "mcpServers": { "mycelium": { "command": "myc", "args": ["mcp"] } } }
+```
 
 ## How it works
 
