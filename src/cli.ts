@@ -21,6 +21,7 @@ usage: myc [-C <dir>] <command> [options] [--json]
                                 --root <file[#Symbol]> --pin <file> --unpin <file>
   check [--update]              re-find every component after edits; --update records them
   remove <slug>                 unregister a component (the code is untouched)
+  mcp                           serve these commands as MCP tools over stdio
 
   -C <dir>   run as if started in <dir>
   --json     machine-readable output
@@ -52,9 +53,9 @@ class Flags {
   one(name: string): string | undefined {
     return this.map.get(name)?.at(-1);
   }
-  /** Every value given, with comma lists split: `--tags a,b --tags c` is a, b, c. */
-  list(name: string): string[] {
-    return (this.map.get(name) ?? []).flatMap((v) => v.split(",")).map((v) => v.trim()).filter(Boolean);
+  /** Every value given; with `split`, comma lists too: `--tags a,b --tags c` is a, b, c. Names and paths may hold commas. */
+  list(name: string, split = false): string[] {
+    return (this.map.get(name) ?? []).flatMap((v) => (split ? v.split(",") : [v])).map((v) => v.trim()).filter(Boolean);
   }
 }
 
@@ -91,6 +92,8 @@ function parse(argv: string[]): { pos: string[]; flags: Flags } {
 export interface Io {
   out: (text: string) => void;
   err: (text: string) => void;
+  /** Takes a command's result in both forms instead of out, for callers that pick one later (the MCP server). */
+  result?: (data: unknown, text: string) => void;
 }
 
 class Ctx {
@@ -123,7 +126,9 @@ class Ctx {
   }
 
   print(data: unknown, text: string | string[]): void {
-    this.io.out(this.json ? JSON.stringify(data, null, 2) : Array.isArray(text) ? text.join("\n") : text);
+    const t = Array.isArray(text) ? text.join("\n") : text;
+    if (this.io.result) this.io.result(data, t);
+    else this.io.out(this.json ? JSON.stringify(data, null, 2) : t);
   }
 }
 
@@ -363,7 +368,7 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
         name: flags.one("name") ?? humanize(slug),
         aliases: flags.list("alias"),
         note: flags.one("note") ?? "",
-        tags: flags.list("tags"),
+        tags: flags.list("tags", true),
         root,
         pins: flags.list("pin").map((p) => ctx.path(p)),
         createdAt: now,
@@ -387,7 +392,7 @@ const COMMANDS: Record<string, { flags: string[]; run: Run }> = {
       const note = flags.one("note");
       if (name !== undefined) e.name = name;
       if (note !== undefined) e.note = note;
-      if (flags.has("tags")) e.tags = flags.list("tags");
+      if (flags.has("tags")) e.tags = flags.list("tags", true);
       const unalias = new Set(flags.list("unalias"));
       e.aliases = [...new Set([...e.aliases, ...flags.list("alias")])].filter((a) => !unalias.has(a));
       const unpin = new Set(flags.list("unpin").map((p) => ctx.path(p)));
@@ -480,4 +485,16 @@ export function run(argv: string[], io: Io = { out: (t) => console.log(t), err: 
   }
 }
 
-if (import.meta.main) process.exitCode = run(process.argv.slice(2));
+if (import.meta.main) {
+  const argv = process.argv.slice(2);
+  // The MCP server runs until its client hangs up, so it lives outside the one-shot commands.
+  let mcp: string | undefined;
+  try {
+    const { pos, flags } = parse(argv);
+    if (pos[0] === "mcp") mcp = resolve(flags.one("C") ?? process.cwd());
+  } catch {
+    // run() reports the bad arguments.
+  }
+  if (mcp) await (await import("./mcp.ts")).serve(mcp);
+  else process.exitCode = run(argv);
+}
